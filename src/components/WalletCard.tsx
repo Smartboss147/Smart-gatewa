@@ -10,17 +10,22 @@ import {
   TrendingUp,
   Coins,
   ShieldCheck,
-  Smartphone
+  Smartphone,
+  ExternalLink,
+  Loader2
 } from 'lucide-react';
 import { DbUser } from '../types.ts';
 
 interface WalletCardProps {
   user: DbUser;
+  currentUser: any;
   onFundWallet: (amountKobo: number, reference: string) => Promise<void>;
+  onUpdateUser: (user: DbUser) => void;
 }
 
-export default function WalletCard({ user, onFundWallet }: WalletCardProps) {
+export default function WalletCard({ user, currentUser, onFundWallet, onUpdateUser }: WalletCardProps) {
   const [showFundModal, setShowFundModal] = useState(false);
+  const [modalStep, setModalStep] = useState<'amount' | 'simulator' | 'real_verify'>('amount');
   const [amountInput, setAmountInput] = useState('');
   const [cardNumber, setCardNumber] = useState('');
   const [cardExpiry, setCardExpiry] = useState('');
@@ -32,13 +37,17 @@ export default function WalletCard({ user, onFundWallet }: WalletCardProps) {
   const [copiedCode, setCopiedCode] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
 
+  const [paystackRef, setPaystackRef] = useState('');
+  const [realAuthUrl, setRealAuthUrl] = useState('');
+  const [verificationLoading, setVerificationLoading] = useState(false);
+
   const copyReferralCode = () => {
     navigator.clipboard.writeText(user.referralCode);
     setCopiedCode(true);
     setTimeout(() => setCopiedCode(false), 2000);
   };
 
-  const handleFundSubmit = async (e: React.FormEvent) => {
+  const handleProceedToGateway = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg('');
 
@@ -50,6 +59,91 @@ export default function WalletCard({ user, onFundWallet }: WalletCardProps) {
 
     if (parsedAmount < 100) {
       setErrorMsg('Minimum funding amount is ₦100.');
+      return;
+    }
+
+    setIsLoading(true);
+    setLoadingStep('Contacting secure billing server...');
+    try {
+      const idToken = currentUser ? await currentUser.getIdToken() : '';
+      const res = await fetch('/api/wallet/paystack/initialize', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${idToken}`
+        },
+        body: JSON.stringify({ amount: parsedAmount })
+      });
+
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || 'Failed to initialize payment gateway.');
+      }
+
+      const data = await res.json();
+      if (data.simulation) {
+        // Fallback to beautiful simulated card workflow
+        setModalStep('simulator');
+      } else {
+        // Real Paystack gateway active!
+        setPaystackRef(data.reference);
+        setRealAuthUrl(data.authorizationUrl);
+        setModalStep('real_verify');
+        // Open the authorizationUrl in a new tab safely
+        window.open(data.authorizationUrl, '_blank');
+      }
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Failed to initialize payment checkout.');
+    } finally {
+      setIsLoading(false);
+      setLoadingStep('');
+    }
+  };
+
+  const handleVerifyRealPayment = async () => {
+    if (!paystackRef) return;
+    setVerificationLoading(true);
+    setErrorMsg('');
+    try {
+      const idToken = currentUser ? await currentUser.getIdToken() : '';
+      const res = await fetch(`/api/wallet/verify/${paystackRef}`, {
+        headers: {
+          'Authorization': `Bearer ${idToken}`
+        }
+      });
+
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || 'Verification request failed.');
+      }
+
+      const data = await res.json();
+      if (data.success) {
+        // Credit succeeded! Refresh user
+        onUpdateUser(data.user);
+        // Reset states
+        setShowFundModal(false);
+        setModalStep('amount');
+        setAmountInput('');
+        setPaystackRef('');
+        setRealAuthUrl('');
+      } else {
+        setErrorMsg(data.message || 'Payment could not be verified yet. Please complete checkout in the opened tab, then click verify again.');
+      }
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Verification failed. Please try again.');
+    } finally {
+      setVerificationLoading(false);
+    }
+  };
+
+  const handleFundSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMsg('');
+
+    const parsedAmount = parseFloat(amountInput);
+    if (isNaN(parsedAmount) || parsedAmount <= 0) {
+      setErrorMsg('Please enter a valid amount.');
       return;
     }
 
@@ -87,7 +181,6 @@ export default function WalletCard({ user, onFundWallet }: WalletCardProps) {
 
       setLoadingStep('Authorizing wallet credit payload...');
       
-      // Call the actual backend endpoint
       const mockPaystackRef = `PAYSTACK-REF-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
       const amountKobo = Math.floor(parsedAmount * 100);
       
@@ -95,6 +188,7 @@ export default function WalletCard({ user, onFundWallet }: WalletCardProps) {
 
       // Reset
       setShowFundModal(false);
+      setModalStep('amount');
       setAmountInput('');
       setCardNumber('');
       setCardExpiry('');
@@ -232,147 +326,266 @@ export default function WalletCard({ user, onFundWallet }: WalletCardProps) {
             <div className="bg-blue-50/50 p-2 rounded-xl border border-blue-100/50">
               <span className="text-[9px] font-bold text-blue-600 block uppercase">Referred Code</span>
               <span className="text-xs font-bold text-blue-800">
-                {user.referredBy ? 'VTU-LINKED' : 'NOT SET'}
+                {user.referredBy ? 'SG-LINKED' : 'NOT SET'}
               </span>
             </div>
           </div>
         </div>
       </div>
 
-      {/* ==================== FUND WALLET MODAL (PAYSTACK SIMULATION) ==================== */}
+      {/* ==================== FUND WALLET MODAL (MULTI-PHASE CHECKOUT) ==================== */}
       {showFundModal && (
         <div className="fixed inset-0 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-3xl w-full max-w-md overflow-hidden shadow-2xl relative border border-slate-100 animate-in fade-in zoom-in-95 duration-200">
             
-            {/* Paystack header banner */}
+            {/* Modal Header */}
             <div className="bg-slate-900 text-white p-5 flex justify-between items-center relative">
               <div className="flex items-center gap-2">
                 <div className="w-8 h-8 rounded-lg bg-emerald-500 flex items-center justify-center text-white">
                   <Coins className="w-4.5 h-4.5" />
                 </div>
                 <div>
-                  <h4 className="text-sm font-bold">Paystack Checkout</h4>
-                  <p className="text-[10px] text-emerald-400 font-mono">Secured Sandbox Engine</p>
+                  <h4 className="text-sm font-bold">
+                    {modalStep === 'amount' && 'Fund Digital Wallet'}
+                    {modalStep === 'simulator' && 'Paystack Sandbox Card Simulator'}
+                    {modalStep === 'real_verify' && 'Real Paystack Verification'}
+                  </h4>
+                  <p className="text-[10px] text-emerald-400 font-mono">
+                    {modalStep === 'amount' && 'Secure Checkout Portal'}
+                    {modalStep === 'simulator' && 'Local Simulation Mode'}
+                    {modalStep === 'real_verify' && `Ref: ${paystackRef}`}
+                  </p>
                 </div>
               </div>
               <button 
                 onClick={() => {
-                  if (!isLoading) setShowFundModal(false);
+                  if (!isLoading && !verificationLoading) {
+                    setShowFundModal(false);
+                    setModalStep('amount');
+                    setAmountInput('');
+                    setPaystackRef('');
+                    setRealAuthUrl('');
+                    setErrorMsg('');
+                  }
                 }}
                 className="text-slate-400 hover:text-white transition-all text-sm cursor-pointer"
-                disabled={isLoading}
+                disabled={isLoading || verificationLoading}
               >
                 Cancel
               </button>
             </div>
 
-            <form onSubmit={handleFundSubmit} className="p-6 space-y-4">
-              {errorMsg && (
-                <div className="p-3 bg-red-50 border border-red-100 text-red-700 rounded-xl text-xs font-semibold leading-relaxed">
-                  {errorMsg}
-                </div>
-              )}
-
-              {/* Amount input */}
-              <div>
-                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">Top-up Amount (₦)</label>
-                <div className="relative">
-                  <span className="absolute left-3.5 top-2.5 text-slate-500 font-bold text-sm">₦</span>
-                  <input
-                    type="number"
-                    value={amountInput}
-                    onChange={(e) => setAmountInput(e.target.value)}
-                    placeholder="e.g. 5,000"
-                    disabled={isLoading}
-                    className="w-full bg-slate-50 border border-slate-200 focus:border-blue-500 rounded-xl pl-8 pr-4 py-2.5 text-sm font-bold focus:outline-none"
-                    required
-                  />
-                </div>
-                <span className="text-[10px] text-slate-400 mt-1 block">Minimum ₦100 to activate wallet.</span>
+            {/* Error Message banner */}
+            {errorMsg && (
+              <div className="mx-6 mt-4 p-3.5 bg-red-50 border border-red-100 text-red-700 rounded-xl text-xs font-semibold leading-relaxed">
+                {errorMsg}
               </div>
+            )}
 
-              {/* Card Number */}
-              <div>
-                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">Debit Card Number</label>
-                <div className="relative">
-                  <CreditCard className="absolute left-3.5 top-3 text-slate-400 w-4.5 h-4.5" />
-                  <input
-                    type="text"
-                    value={cardNumber}
-                    onChange={handleCardNumberChange}
-                    placeholder="4000 1234 5678 9010"
-                    disabled={isLoading}
-                    className="w-full bg-slate-50 border border-slate-200 focus:border-blue-500 rounded-xl pl-10 pr-4 py-2.5 text-sm font-mono focus:outline-none"
-                    required
-                  />
+            {/* Phase 1: Amount Selection */}
+            {modalStep === 'amount' && (
+              <form onSubmit={handleProceedToGateway} className="p-6 space-y-4">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">Top-up Amount (₦)</label>
+                  <div className="relative">
+                    <span className="absolute left-3.5 top-2.5 text-slate-500 font-bold text-sm">₦</span>
+                    <input
+                      type="number"
+                      value={amountInput}
+                      onChange={(e) => setAmountInput(e.target.value)}
+                      placeholder="e.g. 5,000"
+                      disabled={isLoading}
+                      className="w-full bg-slate-50 border border-slate-200 focus:border-blue-500 rounded-xl pl-8 pr-4 py-2.5 text-sm font-bold focus:outline-none"
+                      required
+                    />
+                  </div>
+                  <span className="text-[10px] text-slate-400 mt-1 block">Minimum ₦100 to process wallet recharges.</span>
                 </div>
-              </div>
 
-              {/* Grid: Expiry & CVV */}
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">Card Expiry</label>
-                  <input
-                    type="text"
-                    value={cardExpiry}
-                    onChange={handleExpiryChange}
-                    placeholder="MM/YY"
-                    disabled={isLoading}
-                    className="w-full bg-slate-50 border border-slate-200 focus:border-blue-500 rounded-xl px-3.5 py-2.5 text-sm font-mono text-center focus:outline-none"
-                    required
-                  />
+                <div className="pt-2">
+                  {isLoading ? (
+                    <div className="text-center space-y-2 py-2">
+                      <div className="w-6 h-6 border-2 border-blue-600 border-t-transparent rounded-full animate-spin mx-auto"></div>
+                      <p className="text-xs font-semibold text-blue-600 animate-pulse">{loadingStep}</p>
+                    </div>
+                  ) : (
+                    <button
+                      type="submit"
+                      className="w-full py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold shadow-md shadow-blue-100 transition-colors cursor-pointer"
+                    >
+                      Connect with Payment Gateway
+                    </button>
+                  )}
                 </div>
+              </form>
+            )}
+
+            {/* Phase 2: Credit Card Sandbox Simulation */}
+            {modalStep === 'simulator' && (
+              <form onSubmit={handleFundSubmit} className="p-6 space-y-4">
+                <div className="p-3 bg-blue-50 rounded-xl border border-blue-100 text-[11px] text-blue-900 font-medium">
+                  💳 <strong>Simulator Active:</strong> No active <code>PAYSTACK_SECRET_KEY</code> found in backend settings. Use any simulated card details below to test wallet credentials.
+                </div>
+
+                {/* Card Number */}
                 <div>
-                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">CVV Code</label>
+                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">Debit Card Number</label>
+                  <div className="relative">
+                    <CreditCard className="absolute left-3.5 top-3 text-slate-400 w-4.5 h-4.5" />
+                    <input
+                      type="text"
+                      value={cardNumber}
+                      onChange={handleCardNumberChange}
+                      placeholder="4000 1234 5678 9010"
+                      disabled={isLoading}
+                      className="w-full bg-slate-50 border border-slate-200 focus:border-blue-500 rounded-xl pl-10 pr-4 py-2.5 text-sm font-mono focus:outline-none"
+                      required
+                    />
+                  </div>
+                </div>
+
+                {/* Grid: Expiry & CVV */}
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">Card Expiry</label>
+                    <input
+                      type="text"
+                      value={cardExpiry}
+                      onChange={handleExpiryChange}
+                      placeholder="MM/YY"
+                      disabled={isLoading}
+                      className="w-full bg-slate-50 border border-slate-200 focus:border-blue-500 rounded-xl px-3.5 py-2.5 text-sm font-mono text-center focus:outline-none"
+                      required
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">CVV Code</label>
+                    <input
+                      type="password"
+                      maxLength={3}
+                      value={cardCvv}
+                      onChange={(e) => setCardCvv(e.target.value.replace(/\D/g, ''))}
+                      placeholder="123"
+                      disabled={isLoading}
+                      className="w-full bg-slate-50 border border-slate-200 focus:border-blue-500 rounded-xl px-3.5 py-2.5 text-sm font-mono text-center focus:outline-none"
+                      required
+                    />
+                  </div>
+                </div>
+
+                {/* PIN code */}
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">Card Pin</label>
                   <input
                     type="password"
-                    maxLength={3}
-                    value={cardCvv}
-                    onChange={(e) => setCardCvv(e.target.value.replace(/\D/g, ''))}
-                    placeholder="123"
+                    maxLength={4}
+                    value={cardPin}
+                    onChange={(e) => setCardPin(e.target.value.replace(/\D/g, ''))}
+                    placeholder="✱ ✱ ✱ ✱"
                     disabled={isLoading}
-                    className="w-full bg-slate-50 border border-slate-200 focus:border-blue-500 rounded-xl px-3.5 py-2.5 text-sm font-mono text-center focus:outline-none"
+                    className="w-full bg-slate-50 border border-slate-200 focus:border-blue-500 rounded-xl px-3.5 py-2.5 text-sm font-mono text-center tracking-widest focus:outline-none"
                     required
                   />
                 </div>
-              </div>
 
-              {/* PIN code */}
-              <div>
-                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">Card Pin</label>
-                <input
-                  type="password"
-                  maxLength={4}
-                  value={cardPin}
-                  onChange={(e) => setCardPin(e.target.value.replace(/\D/g, ''))}
-                  placeholder="✱ ✱ ✱ ✱"
-                  disabled={isLoading}
-                  className="w-full bg-slate-50 border border-slate-200 focus:border-blue-500 rounded-xl px-3.5 py-2.5 text-sm font-mono text-center tracking-widest focus:outline-none"
-                  required
-                />
-              </div>
+                {/* Submit / Simulation Status */}
+                <div className="pt-2 flex flex-col gap-2">
+                  {isLoading ? (
+                    <div className="text-center space-y-2 py-2">
+                      <div className="w-6 h-6 border-2 border-blue-600 border-t-transparent rounded-full animate-spin mx-auto"></div>
+                      <p className="text-xs font-semibold text-blue-600 animate-pulse">{loadingStep}</p>
+                    </div>
+                  ) : (
+                    <>
+                      <button
+                        type="submit"
+                        className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold shadow-md shadow-emerald-100 transition-colors cursor-pointer"
+                      >
+                        Authorize ₦{amountInput ? parseFloat(amountInput).toLocaleString() : '0.00'} Simulation
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setModalStep('amount');
+                          setErrorMsg('');
+                        }}
+                        className="w-full py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition-colors cursor-pointer"
+                      >
+                        Back to Amount
+                      </button>
+                    </>
+                  )}
+                </div>
+              </form>
+            )}
 
-              {/* Submit / Simulation Status */}
-              <div className="pt-2">
-                {isLoading ? (
-                  <div className="text-center space-y-2 py-2">
-                    <div className="w-6 h-6 border-2 border-blue-600 border-t-transparent rounded-full animate-spin mx-auto"></div>
-                    <p className="text-xs font-semibold text-blue-600 animate-pulse">{loadingStep}</p>
-                  </div>
-                ) : (
-                  <button
-                    type="submit"
-                    className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-sm font-bold shadow-md shadow-emerald-100 transition-colors cursor-pointer"
+            {/* Phase 3: Real Paystack Gateway Opened Verification */}
+            {modalStep === 'real_verify' && (
+              <div className="p-6 space-y-5 text-center">
+                <div className="w-16 h-16 bg-blue-50 text-blue-600 rounded-full flex items-center justify-center mx-auto animate-pulse">
+                  <ExternalLink className="w-8 h-8" />
+                </div>
+
+                <div className="space-y-2">
+                  <h5 className="font-extrabold text-blue-950 text-sm">Real Paystack Session Initiated</h5>
+                  <p className="text-xs text-slate-500 leading-relaxed px-2">
+                    We've securely opened the official Paystack payment tab for you to complete checkout. 
+                    If it did not launch automatically, click the button below.
+                  </p>
+                </div>
+
+                <div className="space-y-3">
+                  <a
+                    href={realAuthUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="w-full py-3 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer shadow-md"
                   >
-                    Authorize ₦{amountInput ? parseFloat(amountInput).toLocaleString() : '0.00'} Payment
-                  </button>
-                )}
+                    Open Payment Page <ExternalLink className="w-4 h-4" />
+                  </a>
+
+                  <div className="border-t border-slate-100 pt-4 mt-2">
+                    <p className="text-[10px] text-slate-400 mb-3">
+                      Once you finish the transfer or card transaction on Paystack, click verification below:
+                    </p>
+
+                    {verificationLoading ? (
+                      <div className="text-center py-2 space-y-1">
+                        <Loader2 className="w-6 h-6 animate-spin text-blue-600 mx-auto" />
+                        <p className="text-[10px] text-blue-600 font-bold animate-pulse">Checking Paystack Settlement Ledger...</p>
+                      </div>
+                    ) : (
+                      <div className="flex flex-col gap-2">
+                        <button
+                          type="button"
+                          onClick={handleVerifyRealPayment}
+                          className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold shadow-md shadow-emerald-50 transition-colors cursor-pointer"
+                        >
+                          I Have Paid (Verify & Credit Balance)
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setModalStep('amount');
+                            setAmountInput('');
+                            setPaystackRef('');
+                            setRealAuthUrl('');
+                            setErrorMsg('');
+                          }}
+                          className="w-full py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition-all cursor-pointer"
+                        >
+                          Cancel / Start Over
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
               </div>
-            </form>
+            )}
 
             <div className="bg-slate-50 p-4 border-t border-slate-100 text-center">
               <span className="text-[10px] text-slate-400 font-mono">
-                Paystack Verified Merchant Sandbox Integration (Test Mode Enabled)
+                {modalStep === 'real_verify' ? 'Secure Live Callback Settlement Channels' : 'Paystack Verified Merchant Security Protocols'}
               </span>
             </div>
           </div>

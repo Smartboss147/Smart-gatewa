@@ -93,8 +93,403 @@ async function startServer() {
   });
 
   // ==========================================================
-  // 3. WALLET OPERATIONS (PAYSTACK SIMULATION)
+  // 1.5. CREDENTIALS & SYSTEM DIAGNOSTICS TEST
   // ==========================================================
+  app.get('/api/system/diagnostics', async (req, res) => {
+    try {
+      // 1. Check database connection
+      let dbStatus = false;
+      try {
+        await db.select().from(users).limit(1);
+        dbStatus = true;
+      } catch (err) {
+        console.error('Diagnostic DB test error:', err);
+      }
+
+      // 2. Check Firebase Admin environment variables
+      const hasFirebaseAdminKeys = !!(process.env.FIREBASE_PROJECT_ID || process.env.FIREBASE_CLIENT_EMAIL || process.env.FIREBASE_PRIVATE_KEY);
+      
+      // 3. Check Paystack Secret Key environment variable
+      const paystackKey = process.env.PAYSTACK_SECRET_KEY;
+      const hasPaystackSecretKey = !!paystackKey;
+      let paystackKeyMode = 'inactive';
+      if (hasPaystackSecretKey) {
+        paystackKeyMode = paystackKey.startsWith('sk_test_') ? 'test_mode' : 'live_mode';
+      }
+
+      // 4. Check admin emails configuration
+      const hasAdminEmail = !!process.env.ADMIN_EMAIL;
+
+      res.json({
+        dbConnected: dbStatus,
+        firebaseAdminConfigured: hasFirebaseAdminKeys,
+        paystackConfigured: hasPaystackSecretKey,
+        paystackMode: paystackKeyMode,
+        adminEmailConfigured: hasAdminEmail,
+        timestamp: new Date()
+      });
+    } catch (error) {
+      res.status(500).json({ error: 'Failed to perform system diagnostics.' });
+    }
+  });
+
+  // ==========================================================
+  // 3. WALLET OPERATIONS (PAYSTACK SIMULATION & REAL GATEWAY)
+  // ==========================================================
+
+  // Initialize Paystack transaction (either real or fallback to sandbox simulator)
+  app.post('/api/wallet/paystack/initialize', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const { amount } = req.body; // Amount in Naira
+      const userRecord = req.dbUser;
+
+      if (!amount || isNaN(amount) || amount <= 0) {
+        return res.status(400).json({ error: 'Please enter a valid funding amount.' });
+      }
+
+      const amountKobo = Math.floor(amount * 100);
+      const secretKey = process.env.PAYSTACK_SECRET_KEY;
+
+      if (!secretKey) {
+        // Return fallback simulation info
+        return res.json({ 
+          simulation: true, 
+          message: 'Paystack Secret Key is not configured on the server. Falling back to secure sandbox simulation.' 
+        });
+      }
+
+      // We have a real key! Let's make a real API call to Paystack
+      const reference = `PAYSTACK-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
+      const appUrl = process.env.APP_URL || 'http://localhost:3000';
+      const callbackUrl = `${appUrl.endsWith('/') ? appUrl.slice(0, -1) : appUrl}/api/wallet/paystack-callback`;
+
+      const response = await fetch('https://api.paystack.co/transaction/initialize', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${secretKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          email: userRecord.email,
+          amount: amountKobo,
+          reference: reference,
+          callback_url: callbackUrl,
+          metadata: {
+            userId: userRecord.id,
+            amountKobo: amountKobo
+          }
+        })
+      });
+
+      const data = await response.json();
+      if (!response.ok || !data.status) {
+        console.error('Paystack initialize failed:', data);
+        return res.status(400).json({ 
+          error: data.message || 'Failed to initialize real Paystack transaction.',
+          details: data 
+        });
+      }
+
+      res.json({
+        success: true,
+        simulation: false,
+        authorizationUrl: data.data.authorization_url,
+        reference: reference
+      });
+
+    } catch (err: any) {
+      console.error('Paystack initialization exception:', err);
+      res.status(500).json({ error: 'An unexpected error occurred during Paystack initialization.' });
+    }
+  });
+
+  // Paystack Redirect callback handler
+  app.get('/api/wallet/paystack-callback', async (req, res) => {
+    try {
+      const { reference } = req.query;
+      if (!reference) {
+        return res.send(`
+          <html>
+            <body style="font-family: sans-serif; text-align: center; padding-top: 50px; background-color: #f8fafc;">
+              <h2 style="color: #ef4444;">Missing Transaction Reference</h2>
+              <p>We could not find the payment reference. Please return to the Smart Gateway app.</p>
+              <button onclick="window.close()" style="padding: 10px 20px; background-color: #2563eb; color: white; border: none; border-radius: 8px; font-weight: bold; cursor: pointer;">Close Window</button>
+            </body>
+          </html>
+        `);
+      }
+
+      // Verify transaction reference on Paystack
+      const secretKey = process.env.PAYSTACK_SECRET_KEY;
+      if (!secretKey) {
+        return res.status(400).send('Paystack secret key is missing.');
+      }
+
+      const verifyUrl = `https://api.paystack.co/transaction/verify/${reference}`;
+      const response = await fetch(verifyUrl, {
+        headers: {
+          'Authorization': `Bearer ${secretKey}`
+        }
+      });
+
+      const data = await response.json();
+      if (!response.ok || !data.status || data.data.status !== 'success') {
+        return res.send(`
+          <html>
+            <body style="font-family: sans-serif; text-align: center; padding-top: 50px; background-color: #f8fafc;">
+              <h2 style="color: #ef4444;">Payment Verification Failed</h2>
+              <p>The transaction could not be verified or was unsuccessful. Ref: ${reference}</p>
+              <button onclick="window.close()" style="padding: 10px 20px; background-color: #2563eb; color: white; border: none; border-radius: 8px; font-weight: bold; cursor: pointer;">Close Window</button>
+            </body>
+          </html>
+        `);
+      }
+
+      // Success! Credit the user's wallet
+      const amountKobo = data.data.amount;
+      const metadata = data.data.metadata || {};
+      const userId = metadata.userId;
+
+      if (!userId) {
+        return res.status(400).send('Could not map payment to user record.');
+      }
+
+      // Check if reference already processed
+      const existingTx = await db.select().from(transactions).where(eq(transactions.reference, String(reference)));
+      if (existingTx.length > 0) {
+        return res.send(`
+          <html>
+            <body style="font-family: sans-serif; text-align: center; padding-top: 50px; background-color: #f8fafc;">
+              <div style="max-width: 450px; margin: 0 auto; background: white; padding: 30px; border-radius: 16px; border: 1px solid #e2e8f0; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);">
+                <div style="background-color: #10b981; color: white; width: 60px; height: 60px; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin: 0 auto 20px; font-size: 30px;">✓</div>
+                <h2 style="color: #0f172a; margin-bottom: 8px;">Payment Credited!</h2>
+                <p style="color: #64748b; font-size: 14px; margin-bottom: 24px;">This payment of ₦${(amountKobo / 100).toLocaleString()} has already been successfully credited to your wallet.</p>
+                <button onclick="window.close()" style="padding: 12px 24px; background-color: #2563eb; color: white; border: none; border-radius: 12px; font-weight: bold; cursor: pointer; width: 100%;">Return to Smart Gateway Dashboard</button>
+              </div>
+            </body>
+          </html>
+        `);
+      }
+
+      // Fetch user
+      const userList = await db.select().from(users).where(eq(users.id, Number(userId)));
+      if (userList.length === 0) {
+        return res.status(400).send('User not found.');
+      }
+      const userRecord = userList[0];
+
+      // Update balance
+      const newBalance = userRecord.walletBalance + amountKobo;
+      await db.update(users).set({ walletBalance: newBalance }).where(eq(users.id, userRecord.id));
+
+      // Log transaction
+      await db.insert(transactions).values({
+        userId: userRecord.id,
+        type: 'wallet_funding',
+        amount: amountKobo,
+        status: 'success',
+        reference: String(reference),
+        provider: 'Paystack',
+        recipient: userRecord.email,
+        details: `Funded ₦${(amountKobo / 100).toLocaleString()} via Paystack Secure Checkout.`,
+      });
+
+      // Notify
+      await db.insert(notifications).values({
+        userId: userRecord.id,
+        title: 'Wallet Funded Successfully!',
+        message: `Your wallet has been credited with ₦${(amountKobo / 100).toLocaleString()}. Reference: ${reference}`,
+      });
+
+      // Referral System (10% of first deposit to referrer)
+      if (userRecord.referredBy) {
+        const pastFundings = await db.select()
+          .from(transactions)
+          .where(and(eq(transactions.userId, userRecord.id), eq(transactions.type, 'wallet_funding')));
+
+        if (pastFundings.length === 1) {
+          const referrerCode = userRecord.referredBy;
+          const referrers = await db.select().from(users).where(eq(users.referralCode, referrerCode));
+
+          if (referrers.length > 0) {
+            const referrer = referrers[0];
+            const referralBonus = Math.floor(amountKobo * 0.10);
+
+            await db.update(users)
+              .set({
+                walletBalance: referrer.walletBalance + referralBonus,
+                referralEarnings: referrer.referralEarnings + referralBonus,
+              })
+              .where(eq(users.id, referrer.id));
+
+            const refTxRef = `REF-${Math.floor(100000 + Math.random() * 900000)}`;
+            await db.insert(transactions).values({
+              userId: referrer.id,
+              type: 'referral_bonus',
+              amount: referralBonus,
+              status: 'success',
+              reference: refTxRef,
+              provider: 'System',
+              recipient: userRecord.email,
+              details: `Referral bonus of 10% on ${userRecord.fullName || userRecord.email}'s first deposit.`,
+            });
+
+            await db.insert(notifications).values({
+              userId: referrer.id,
+              title: 'Referral Bonus Received! ₦',
+              message: `You earned ₦${(referralBonus / 100).toFixed(2)} because ${userRecord.fullName || userRecord.email} made their first deposit!`,
+            });
+          }
+        }
+      }
+
+      // Success screen
+      return res.send(`
+        <html>
+          <body style="font-family: sans-serif; text-align: center; padding-top: 50px; background-color: #f8fafc;">
+            <div style="max-width: 450px; margin: 0 auto; background: white; padding: 30px; border-radius: 16px; border: 1px solid #e2e8f0; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);">
+              <div style="background-color: #10b981; color: white; width: 60px; height: 60px; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin: 0 auto 20px; font-size: 30px;">✓</div>
+              <h2 style="color: #0f172a; margin-bottom: 8px;">Funding Successful!</h2>
+              <p style="color: #64748b; font-size: 14px; margin-bottom: 24px;">Your payment of ₦${(amountKobo / 100).toLocaleString()} has been successfully processed and added to your wallet balance.</p>
+              <button onclick="window.close()" style="padding: 12px 24px; background-color: #2563eb; color: white; border: none; border-radius: 12px; font-weight: bold; cursor: pointer; width: 100%;">Return to Smart Gateway Dashboard</button>
+            </div>
+          </body>
+        </html>
+      `);
+
+    } catch (error: any) {
+      console.error('Callback handler error:', error);
+      res.status(500).send('Unexpected error while verifying payment.');
+    }
+  });
+
+  // Verify specific reference (called manually or polled by frontend)
+  app.get('/api/wallet/verify/:reference', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const { reference } = req.params;
+      const userRecord = req.dbUser;
+
+      // Check if already in DB
+      const existingTxList = await db.select().from(transactions).where(eq(transactions.reference, reference));
+      if (existingTxList.length > 0) {
+        const freshUser = await db.select().from(users).where(eq(users.id, userRecord.id));
+        return res.json({ 
+          success: true, 
+          status: 'success', 
+          message: 'Payment verified and wallet credited.',
+          walletBalance: freshUser[0].walletBalance, 
+          user: freshUser[0] 
+        });
+      }
+
+      // Check with Paystack if key present
+      const secretKey = process.env.PAYSTACK_SECRET_KEY;
+      if (!secretKey) {
+        return res.status(404).json({ error: 'Transaction reference not found (simulation mode).' });
+      }
+
+      const verifyUrl = `https://api.paystack.co/transaction/verify/${reference}`;
+      const response = await fetch(verifyUrl, {
+        headers: {
+          'Authorization': `Bearer ${secretKey}`
+        }
+      });
+
+      const data = await response.json();
+      if (!response.ok || !data.status || data.data.status !== 'success') {
+        return res.json({ 
+          success: false, 
+          status: data.data?.status || 'failed', 
+          message: data.message || 'Transaction could not be verified.' 
+        });
+      }
+
+      const amountKobo = data.data.amount;
+      const metadata = data.data.metadata || {};
+      const userId = metadata.userId;
+
+      if (Number(userId) !== userRecord.id) {
+        return res.status(400).json({ error: 'This transaction does not belong to your account.' });
+      }
+
+      // Update balance
+      const newBalance = userRecord.walletBalance + amountKobo;
+      await db.update(users).set({ walletBalance: newBalance }).where(eq(users.id, userRecord.id));
+
+      // Log transaction
+      await db.insert(transactions).values({
+        userId: userRecord.id,
+        type: 'wallet_funding',
+        amount: amountKobo,
+        status: 'success',
+        reference: reference,
+        provider: 'Paystack',
+        recipient: userRecord.email,
+        details: `Funded ₦${(amountKobo / 100).toLocaleString()} via Paystack Secure Checkout.`,
+      });
+
+      // Notify
+      await db.insert(notifications).values({
+        userId: userRecord.id,
+        title: 'Wallet Funded Successfully!',
+        message: `Your wallet has been credited with ₦${(amountKobo / 100).toLocaleString()}. Reference: ${reference}`,
+      });
+
+      // Referral Bonus (10% of first deposit to referrer)
+      if (userRecord.referredBy) {
+        const pastFundings = await db.select()
+          .from(transactions)
+          .where(and(eq(transactions.userId, userRecord.id), eq(transactions.type, 'wallet_funding')));
+
+        if (pastFundings.length === 1) {
+          const referrerCode = userRecord.referredBy;
+          const referrers = await db.select().from(users).where(eq(users.referralCode, referrerCode));
+
+          if (referrers.length > 0) {
+            const referrer = referrers[0];
+            const referralBonus = Math.floor(amountKobo * 0.10);
+
+            await db.update(users)
+              .set({
+                walletBalance: referrer.walletBalance + referralBonus,
+                referralEarnings: referrer.referralEarnings + referralBonus,
+              })
+              .where(eq(users.id, referrer.id));
+
+            const refTxRef = `REF-${Math.floor(100000 + Math.random() * 900000)}`;
+            await db.insert(transactions).values({
+              userId: referrer.id,
+              type: 'referral_bonus',
+              amount: referralBonus,
+              status: 'success',
+              reference: refTxRef,
+              provider: 'System',
+              recipient: userRecord.email,
+              details: `Referral bonus of 10% on ${userRecord.fullName || userRecord.email}'s first deposit.`,
+            });
+
+            await db.insert(notifications).values({
+              userId: referrer.id,
+              title: 'Referral Bonus Received! ₦',
+              message: `You earned ₦${(referralBonus / 100).toFixed(2)} because ${userRecord.fullName || userRecord.email} made their first deposit!`,
+            });
+          }
+        }
+      }
+
+      const freshUser = await db.select().from(users).where(eq(users.id, userRecord.id));
+      res.json({ 
+        success: true, 
+        status: 'success',
+        walletBalance: freshUser[0].walletBalance, 
+        user: freshUser[0] 
+      });
+
+    } catch (err: any) {
+      console.error('Verify endpoint error:', err);
+      res.status(500).json({ error: 'Failed to verify transaction reference.' });
+    }
+  });
 
   // Process wallet funding (Simulates Paystack payment reference webhook verification)
   app.post('/api/wallet/fund', requireAuth, async (req: AuthRequest, res) => {
@@ -583,7 +978,7 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`VTU-Pay Server running on host http://0.0.0.0:${PORT}`);
+    console.log(`Smart Gateway Server running on host http://0.0.0.0:${PORT}`);
   });
 }
 

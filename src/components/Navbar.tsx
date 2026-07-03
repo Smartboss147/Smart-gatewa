@@ -49,7 +49,7 @@ export default function Navbar({
                 <CreditCard className="w-5.5 h-5.5" />
               </div>
               <span className="text-xl font-bold text-blue-900 tracking-tight">
-                VTU<span className="text-blue-600">Pay</span>
+                Smart<span className="text-blue-600">Gateway</span>
               </span>
             </div>
 

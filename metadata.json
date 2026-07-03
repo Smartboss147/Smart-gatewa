@@ -1,6 +1,6 @@
 {
   "name": "Nigerian Utility Payment Web Application",
-  "description": "A modern, secure Nigerian utility payment application with user authentication, wallet funding simulation, airtime, data subscription, electricity, cable TV, and an admin command console.",
+  "description": "Smart Gateway is a modern Nigerian digital utility payment platform that allows users to purchase airtime, data bundles, electricity tokens, cable TV subscriptions, and other digital services through a secure wallet system.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

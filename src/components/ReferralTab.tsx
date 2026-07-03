@@ -68,11 +68,11 @@ export default function ReferralTab({ user, onUpdateReferralCode }: ReferralTabP
           <div className="absolute top-0 right-0 w-32 h-32 bg-white/10 rounded-full blur-2xl -mr-10 -mt-10"></div>
           
           <span className="bg-white/20 px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider text-blue-50">
-            VTU-Pay Partner Program
+            Smart Gateway Partner Program
           </span>
           <h2 className="text-xl sm:text-2xl font-extrabold mt-3 tracking-tight">Earn ₦ for every peer you refer!</h2>
           <p className="text-xs text-blue-100 mt-2 leading-relaxed">
-            Invite friends to VTU-Pay using your unique code. When they fund their wallet, you get a <strong className="text-white">10% instant cash bonus</strong> from their first deposit amount credited directly to your wallet!
+            Invite friends to Smart Gateway using your unique code. When they fund their wallet, you get a <strong className="text-white">10% instant cash bonus</strong> from their first deposit amount credited directly to your wallet!
           </p>
 
           <div className="mt-5 pt-4 border-t border-white/10 flex items-center justify-between">
@@ -183,7 +183,7 @@ export default function ReferralTab({ user, onUpdateReferralCode }: ReferralTabP
               <div>
                 <input
                   type="text"
-                  placeholder="Enter VTU-XXXXXX Code"
+                  placeholder="Enter SG-XXXXXX Code"
                   value={referredByInput}
                   onChange={(e) => setReferredByInput(e.target.value)}
                   disabled={isLoading}

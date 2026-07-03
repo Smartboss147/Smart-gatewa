@@ -5,6 +5,8 @@ import {
   createUserWithEmailAndPassword, 
   signInWithCustomToken,
   signOut,
+  sendEmailVerification,
+  sendPasswordResetEmail,
   User as FirebaseUser 
 } from 'firebase/auth';
 import { auth } from './lib/firebase.ts';
@@ -26,7 +28,11 @@ import {
   Lock,
   Mail,
   UserCheck,
-  ArrowRight
+  ArrowRight,
+  Phone,
+  AlertCircle,
+  RefreshCw,
+  Send
 } from 'lucide-react';
 
 // Custom Modules
@@ -40,6 +46,7 @@ import CableForm from './components/CableForm.tsx';
 import HistoryList from './components/HistoryList.tsx';
 import ReferralTab from './components/ReferralTab.tsx';
 import AdminPanel from './components/AdminPanel.tsx';
+import SystemDiagnostics from './components/SystemDiagnostics.tsx';
 
 export default function App() {
   
@@ -52,7 +59,11 @@ export default function App() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [fullName, setFullName] = useState('');
+  const [phone, setPhone] = useState('');
   const [isSignUp, setIsSignUp] = useState(false);
+  const [isForgotPassword, setIsForgotPassword] = useState(false);
+  const [resetEmailSent, setResetEmailSent] = useState(false);
+  const [verificationEmailSent, setVerificationEmailSent] = useState(false);
   const [authError, setAuthError] = useState('');
 
   // Application general lists
@@ -146,9 +157,22 @@ export default function App() {
 
     try {
       if (isSignUp) {
+        // Validate Nigerian 11-digit phone number if provided
+        if (phone && !/^\d{11}$/.test(phone)) {
+          throw new Error('Nigerian phone number must be exactly 11 digits (e.g., 08031234567).');
+        }
+
         // Create user in Firebase
         const credential = await createUserWithEmailAndPassword(auth, email, password);
-        // We will send a profile synchronization request to register their full name on first sync
+        
+        // Send initial email verification immediately
+        try {
+          await sendEmailVerification(credential.user);
+          setVerificationEmailSent(true);
+        } catch (verifErr) {
+          console.error('Email verification trigger error:', verifErr);
+        }
+
         const idToken = await credential.user.getIdToken();
         
         // Trigger background setup on DB by doing a profile update call
@@ -160,7 +184,7 @@ export default function App() {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${idToken}`
           },
-          body: JSON.stringify({ fullName })
+          body: JSON.stringify({ fullName, phone })
         });
         
         setRefreshTrigger(prev => prev + 1);
@@ -174,13 +198,68 @@ export default function App() {
     }
   };
 
+  // Password reset handler
+  const handleForgotPasswordSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError('');
+    if (!email) {
+      setAuthError('Please enter your email address.');
+      return;
+    }
+    setAuthLoading(true);
+    try {
+      await sendPasswordResetEmail(auth, email);
+      setResetEmailSent(true);
+    } catch (err: any) {
+      console.error(err);
+      setAuthError(err.message || 'Failed to send password reset email.');
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  // Resend Verification Email handler
+  const handleResendVerification = async () => {
+    if (!auth.currentUser) return;
+    setAuthError('');
+    try {
+      await sendEmailVerification(auth.currentUser);
+      setVerificationEmailSent(true);
+    } catch (err: any) {
+      console.error(err);
+      setAuthError(err.message || 'Failed to resend verification email.');
+    }
+  };
+
+  // Check/refresh the email verification status of logged-in user
+  const handleRefreshVerificationStatus = async () => {
+    if (!auth.currentUser) return;
+    setAuthError('');
+    setAuthLoading(true);
+    try {
+      await auth.currentUser.reload();
+      const refreshedUser = auth.currentUser;
+      setCurrentUser(refreshedUser);
+      if (refreshedUser.emailVerified) {
+        await syncUserWithDatabase(refreshedUser);
+      } else {
+        setAuthError('Your email is still unverified. Please check your inbox or spam folder.');
+      }
+    } catch (err: any) {
+      console.error(err);
+      setAuthError('Failed to refresh authentication status.');
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
   // Automated Quick Sandbox Demo Login
   const handleSandboxDemoLogin = async () => {
     setAuthError('');
     setAuthLoading(true);
     try {
       // Use standard preconfigured credentials in Firebase sandbox for quick, friction-free testing
-      const sandboxEmail = 'sandbox.testuser@vtupay.com';
+      const sandboxEmail = 'sandbox.testuser@smartgateway.com';
       const sandboxPass = 'SandboxUser123!';
       
       try {
@@ -213,7 +292,7 @@ export default function App() {
     setAuthError('');
     setAuthLoading(true);
     try {
-      const adminEmail = 'admin.moderator@vtupay.com';
+      const adminEmail = 'admin.moderator@smartgateway.com';
       const adminPass = 'AdminModerator99!';
 
       try {
@@ -457,7 +536,7 @@ export default function App() {
           </div>
 
           <h2 className="mt-6 text-2xl sm:text-3xl font-extrabold text-blue-950 tracking-tight">
-            VTU<span className="text-blue-600">Pay</span> Nigeria
+            Smart<span className="text-blue-600">Gateway</span>
           </h2>
           <p className="mt-2 text-xs text-slate-500">
             Secure Nigerian Utility Bills, Airtime & Cable Recharge Terminal
@@ -473,68 +552,155 @@ export default function App() {
               </div>
             )}
 
-            <form onSubmit={handleAuthSubmit} className="space-y-4">
-              
-              {isSignUp && (
+            {resetEmailSent && (
+              <div className="p-3 bg-emerald-50 border border-emerald-100 text-emerald-700 rounded-xl text-xs font-semibold leading-relaxed">
+                Password reset link has been successfully sent to <span className="font-bold">{email}</span>. Please check your inbox or spam folder!
+              </div>
+            )}
+
+            {isForgotPassword ? (
+              <form onSubmit={handleForgotPasswordSubmit} className="space-y-4">
+                <span className="text-xs text-slate-500 block leading-normal">
+                  Enter your registered email address below, and we will send you a secure link to reset your password.
+                </span>
+
                 <div>
-                  <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">Full Name</label>
-                  <input
-                    type="text"
-                    value={fullName}
-                    onChange={(e) => setFullName(e.target.value)}
-                    placeholder="Alhaji Aminu Audu"
-                    className="w-full bg-slate-50 border border-slate-200 focus:border-blue-500 rounded-xl px-3.5 py-2.5 text-xs focus:outline-none"
-                    required
-                  />
+                  <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">Email Address</label>
+                  <div className="relative">
+                    <Mail className="absolute left-3.5 top-3 text-slate-400 w-4.5 h-4.5" />
+                    <input
+                      type="email"
+                      value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                      placeholder="name@gmail.com"
+                      className="w-full bg-slate-50 border border-slate-200 focus:border-blue-500 rounded-xl pl-10 pr-4 py-2.5 text-xs focus:outline-none"
+                      required
+                    />
+                  </div>
                 </div>
-              )}
 
-              <div>
-                <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">Email Address</label>
-                <div className="relative">
-                  <Mail className="absolute left-3.5 top-3 text-slate-400 w-4.5 h-4.5" />
-                  <input
-                    type="email"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    placeholder="name@gmail.com"
-                    className="w-full bg-slate-50 border border-slate-200 focus:border-blue-500 rounded-xl pl-10 pr-4 py-2.5 text-xs focus:outline-none"
-                    required
-                  />
+                <button
+                  type="submit"
+                  className="w-full py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold shadow-md shadow-blue-100 transition-colors cursor-pointer"
+                >
+                  Send Reset Link
+                </button>
+
+                <div className="text-center pt-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsForgotPassword(false);
+                      setResetEmailSent(false);
+                      setAuthError('');
+                    }}
+                    className="text-xs text-blue-600 hover:underline font-bold cursor-pointer"
+                  >
+                    Back to Sign In
+                  </button>
                 </div>
-              </div>
+              </form>
+            ) : (
+              <>
+                <form onSubmit={handleAuthSubmit} className="space-y-4">
+                  
+                  {isSignUp && (
+                    <>
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">Full Name</label>
+                        <input
+                          type="text"
+                          value={fullName}
+                          onChange={(e) => setFullName(e.target.value)}
+                          placeholder="Alhaji Aminu Audu"
+                          className="w-full bg-slate-50 border border-slate-200 focus:border-blue-500 rounded-xl px-3.5 py-2.5 text-xs focus:outline-none"
+                          required
+                        />
+                      </div>
 
-              <div>
-                <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">Password</label>
-                <div className="relative">
-                  <Lock className="absolute left-3.5 top-3 text-slate-400 w-4.5 h-4.5" />
-                  <input
-                    type="password"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    placeholder="••••••••"
-                    className="w-full bg-slate-50 border border-slate-200 focus:border-blue-500 rounded-xl pl-10 pr-4 py-2.5 text-xs focus:outline-none"
-                    required
-                  />
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">Phone Number (Nigerian, 11 digits)</label>
+                        <div className="relative">
+                          <Phone className="absolute left-3.5 top-3 text-slate-400 w-4.5 h-4.5" />
+                          <input
+                            type="tel"
+                            value={phone}
+                            onChange={(e) => setPhone(e.target.value)}
+                            placeholder="08031234567"
+                            className="w-full bg-slate-50 border border-slate-200 focus:border-blue-500 rounded-xl pl-10 pr-4 py-2.5 text-xs focus:outline-none"
+                            required
+                          />
+                        </div>
+                      </div>
+                    </>
+                  )}
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">Email Address</label>
+                    <div className="relative">
+                      <Mail className="absolute left-3.5 top-3 text-slate-400 w-4.5 h-4.5" />
+                      <input
+                        type="email"
+                        value={email}
+                        onChange={(e) => setEmail(e.target.value)}
+                        placeholder="name@gmail.com"
+                        className="w-full bg-slate-50 border border-slate-200 focus:border-blue-500 rounded-xl pl-10 pr-4 py-2.5 text-xs focus:outline-none"
+                        required
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">Password</label>
+                    <div className="relative">
+                      <Lock className="absolute left-3.5 top-3 text-slate-400 w-4.5 h-4.5" />
+                      <input
+                        type="password"
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        placeholder="••••••••"
+                        className="w-full bg-slate-50 border border-slate-200 focus:border-blue-500 rounded-xl pl-10 pr-4 py-2.5 text-xs focus:outline-none"
+                        required
+                      />
+                    </div>
+                  </div>
+
+                  {!isSignUp && (
+                    <div className="text-right">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsForgotPassword(true);
+                          setAuthError('');
+                        }}
+                        className="text-xs text-blue-600 hover:underline font-medium cursor-pointer"
+                      >
+                        Forgot Password?
+                      </button>
+                    </div>
+                  )}
+
+                  <button
+                    type="submit"
+                    className="w-full py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold shadow-md shadow-blue-100 transition-colors cursor-pointer"
+                  >
+                    {isSignUp ? 'Create Secured Account' : 'Authenticate Credentials'}
+                  </button>
+                </form>
+
+                <div className="text-center">
+                  <button
+                    onClick={() => {
+                      setIsSignUp(!isSignUp);
+                      setAuthError('');
+                    }}
+                    className="text-xs text-blue-600 hover:underline font-bold cursor-pointer"
+                  >
+                    {isSignUp ? 'Already have an account? Sign In' : 'Need an account? Register Now'}
+                  </button>
                 </div>
-              </div>
-
-              <button
-                type="submit"
-                className="w-full py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold shadow-md shadow-blue-100 transition-colors cursor-pointer"
-              >
-                {isSignUp ? 'Create Secured Account' : 'Authenticate Credentials'}
-              </button>
-            </form>
-
-            <div className="text-center">
-              <button
-                onClick={() => setIsSignUp(!isSignUp)}
-                className="text-xs text-blue-600 hover:underline font-bold cursor-pointer"
-              >
-                {isSignUp ? 'Already have an account? Sign In' : 'Need an account? Register Now'}
-              </button>
-            </div>
+              </>
+            )}
 
             {/* Quick Demo Bypass (Frictionless Test buttons) */}
             <div className="border-t border-slate-100 pt-5 space-y-3">
@@ -569,6 +735,78 @@ export default function App() {
     );
   }
 
+  // 5.5. RENDER EMAIL VERIFICATION WALL IF USER EMAIL IS UNVERIFIED
+  // Note: We bypass this for Smart Gateway sandbox domain accounts to ensure seamless sandbox testing.
+  const isDemoUser = currentUser?.email?.endsWith('@smartgateway.com');
+  if (currentUser && !currentUser.emailVerified && !isDemoUser) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex flex-col justify-center py-12 sm:px-6 lg:px-8">
+        <div className="sm:mx-auto sm:w-full sm:max-w-md text-center px-4">
+          <div className="w-16 h-16 rounded-2xl bg-amber-500 flex items-center justify-center text-white shadow-xl shadow-amber-100 mx-auto animate-pulse">
+            <AlertCircle className="w-8 h-8" />
+          </div>
+
+          <h2 className="mt-6 text-2xl sm:text-3xl font-extrabold text-blue-950 tracking-tight">
+            Verify Your Email
+          </h2>
+          <p className="mt-2 text-xs text-slate-500">
+            A verification link was sent to <span className="font-bold text-slate-700">{currentUser.email}</span>.
+          </p>
+        </div>
+
+        <div className="mt-8 sm:mx-auto sm:w-full sm:max-w-md px-4">
+          <div className="bg-white py-8 px-6 shadow-xl shadow-slate-100 rounded-3xl border border-blue-50/50 space-y-6">
+            
+            {authError && (
+              <div className="p-3 bg-red-50 border border-red-100 text-red-700 rounded-xl text-xs font-semibold leading-relaxed">
+                {authError}
+              </div>
+            )}
+
+            {verificationEmailSent && (
+              <div className="p-3 bg-emerald-50 border border-emerald-100 text-emerald-700 rounded-xl text-xs font-semibold leading-relaxed">
+                A fresh verification link has been successfully sent. Please check your inbox and spam folders!
+              </div>
+            )}
+
+            <div className="space-y-4">
+              <span className="text-xs text-slate-500 block leading-relaxed text-center">
+                Please click the link inside the confirmation email to activate your secure Smart Gateway digital wallet and enable instant recharges.
+              </span>
+
+              <div className="flex flex-col gap-3">
+                <button
+                  type="button"
+                  onClick={handleRefreshVerificationStatus}
+                  className="w-full py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold shadow-md shadow-blue-100 transition-colors cursor-pointer flex items-center justify-center gap-2"
+                >
+                  <RefreshCw className="w-4 h-4 animate-spin" style={{ animationDuration: '3s' }} /> I Have Verified (Check Status)
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleResendVerification}
+                  className="w-full py-3 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center justify-center gap-2"
+                >
+                  <Send className="w-4 h-4" /> Resend Verification Email
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleSignOut}
+                  className="w-full py-3 text-red-600 hover:bg-red-50 rounded-xl text-xs font-bold transition-colors cursor-pointer"
+                >
+                  Sign Out of Account
+                </button>
+              </div>
+            </div>
+
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   // 6. RENDER LOGGED IN WORKSPACE DASHBOARD
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col pb-16">
@@ -593,7 +831,12 @@ export default function App() {
             {/* Wallet summary row */}
             <WalletCard 
               user={dbUser} 
-              onFundWallet={handleFundWallet} 
+              currentUser={currentUser}
+              onFundWallet={handleFundWallet}
+              onUpdateUser={(updatedUser) => {
+                setDbUser(updatedUser);
+                setRefreshTrigger(prev => prev + 1);
+              }}
             />
 
             {/* Grid: Quick Actions / Buy Utilities form selector */}
@@ -678,6 +921,9 @@ export default function App() {
             {/* Quick history snippet */}
             <HistoryList transactions={transactions.slice(0, 5)} />
 
+            {/* Environment Key Self-Test & Connection Diagnostics */}
+            <SystemDiagnostics />
+
           </div>
         )}
 
@@ -725,7 +971,7 @@ export default function App() {
 
       {/* Minimal Footer */}
       <footer className="text-center text-[10px] text-slate-400 font-mono mt-16 max-w-7xl mx-auto px-4 w-full">
-        <p>© 2026 VTU-Pay Nigeria Ltd. Licensed sandbox payment integrations. Test references are verified on Sandbox Gateway.</p>
+        <p>© 2026 Smart Gateway. Licensed sandbox payment integrations. Test references are verified on Sandbox Gateway.</p>
       </footer>
 
     </div>
