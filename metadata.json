@@ -1,0 +1,6 @@
+{
+  "name": "Nigerian Utility Payment Web Application",
+  "description": "A modern, secure Nigerian utility payment application with user authentication, wallet funding simulation, airtime, data subscription, electricity, cable TV, and an admin command console.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
